@@ -1,0 +1,50 @@
+/* Light neutral theme (from provided palette) */
+:root {
+  color-scheme: light;
+  --fc-bg: #ccd0cf;
+  --fc-muted: #9ba8ab;
+  --fc-text: #253745;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #ffffff 0%, #f5f6f6 100%);
+  color: var(--fc-text);
+}
+
+/* Hide number input spinners (use typed input only) */
+input[data-no-spin="true"]::-webkit-outer-spin-button,
+input[data-no-spin="true"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[data-no-spin="true"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Subtle scrollbar for light theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(204, 208, 207, 0.7);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(155, 168, 171, 0.85);
+  border-radius: 8px;
+  border: 2px solid rgba(204, 208, 207, 0.7);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(155, 168, 171, 0.95);
+}
