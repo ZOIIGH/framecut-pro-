@@ -21,6 +21,7 @@ export interface PlayerHandle {
   endPreview: () => void;
   play: () => void;
   pause: () => void;
+  toggleMute: () => void;
   getIsPlaying: () => boolean;
 }
 
@@ -34,26 +35,68 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
   onAspectRatioChange,
   fitMode,
   onFitModeChange,
-}, ref) => {
-	  const videoRef = useRef<HTMLVideoElement>(null);
-	  const timelineRef = useRef<HTMLDivElement>(null);
-	  const containerRef = useRef<HTMLDivElement>(null);
-	  const titleBarRef = useRef<HTMLDivElement>(null);
-	  const fullscreenContainerRef = useRef<HTMLDivElement>(null);
-	  const videoWrapperRef = useRef<HTMLDivElement>(null);
-	  const hideControlsTimer = useRef<number | null>(null);
-  const isPreviewingRef = useRef(false);
-  const previewRestoreRef = useRef<{ src: string | null; localTime: number; globalTime: number } | null>(null);
-  const activeClipIdRef = useRef(activeClipId);
+		}, ref) => {
+			  const videoRef = useRef<HTMLVideoElement>(null);
+			  const timelinePreviewVideoRef = useRef<HTMLVideoElement>(null);
+			  const timelinePreviewCanvasRef = useRef<HTMLCanvasElement>(null);
+			  const timelineRef = useRef<HTMLDivElement>(null);
+			  const containerRef = useRef<HTMLDivElement>(null);
+			  const titleBarRef = useRef<HTMLDivElement>(null);
+			  const fullscreenContainerRef = useRef<HTMLDivElement>(null);
+			  const videoWrapperRef = useRef<HTMLDivElement>(null);
+			  const hideControlsTimer = useRef<number | null>(null);
+	  const isPointerOverPlayerRef = useRef(false);
+	  const isTimelineHoveredRef = useRef(false);
+	  const isPreviewingRef = useRef(false);
+	  const previewRestoreRef = useRef<{ src: string | null; localTime: number; globalTime: number } | null>(null);
+	  const activeClipIdRef = useRef(activeClipId);
+	  const previewRafRef = useRef<number | null>(null);
+	  const previewPendingTimeRef = useRef<number | null>(null);
+	  const aspectRatioRef = useRef(aspectRatio);
+	  const fitModeRef = useRef(fitMode);
+
+		  const [isPlaying, setIsPlaying] = useState(false);
+	  const [isScrubbing, setIsScrubbing] = useState(false);
+	  const [areControlsVisible, setAreControlsVisible] = useState(false);
+	  const [isFullscreen, setIsFullscreen] = useState(false);
+	  const [timelinePreview, setTimelinePreview] = useState<{
+	    isVisible: boolean;
+	    leftPx: number;
+	    time: number;
+	    width: number;
+	    height: number;
+	  }>({ isVisible: false, leftPx: 0, time: 0, width: 160, height: 90 });
+	  const timelinePreviewTokenRef = useRef(0);
+	  const timelinePreviewRafRef = useRef<number | null>(null);
+	  const timelinePreviewPendingRef = useRef<{ time: number; leftPx: number } | null>(null);
+	  const timelinePreviewCaptureTimeRef = useRef<number | null>(null);
+	  const timelinePreviewWorkerRunningRef = useRef(false);
   
-	  const [isPlaying, setIsPlaying] = useState(false);
-  const [isScrubbing, setIsScrubbing] = useState(false);
-  const [areControlsVisible, setAreControlsVisible] = useState(true);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  
-  // Audio State
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
+	  // Audio State
+	  const [volume, setVolume] = useState(1);
+	  const [isMuted, setIsMuted] = useState(false);
+	  const [muteNotificationVisible, setMuteNotificationVisible] = useState(false);
+	  const muteNotificationTimerRef = useRef<number | null>(null);
+
+	  const toggleMute = useCallback(() => {
+	    setIsMuted((prevMuted) => {
+	      const shouldUnmute = prevMuted || volume === 0;
+	      if (shouldUnmute) {
+	        if (volume === 0) setVolume(1);
+	        return false;
+	      }
+	      return true;
+	    });
+
+	    // Show notification for 1 second
+	    if (muteNotificationTimerRef.current !== null) {
+	      window.clearTimeout(muteNotificationTimerRef.current);
+	    }
+	    setMuteNotificationVisible(true);
+	    muteNotificationTimerRef.current = window.setTimeout(() => {
+	      setMuteNotificationVisible(false);
+	    }, 1000);
+	  }, [volume]);
   
 	  // Container Dimensions for Adaptive Sizing
 	  const [containerDimensions, setContainerDimensions] = useState({ width: 0, height: 0 });
@@ -63,6 +106,8 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 
 	  useEffect(() => { activeClipIdRef.current = activeClipId; }, [activeClipId]);
 	  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+	  useEffect(() => { aspectRatioRef.current = aspectRatio; }, [aspectRatio]);
+	  useEffect(() => { fitModeRef.current = fitMode; }, [fitMode]);
 
   const ratios = [
     { label: '9:16 Story', value: '9:16' },
@@ -80,13 +125,43 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     }
   }, []);
 
-  const scheduleHideControls = useCallback((delayMs = 5000) => {
-    clearHideControlsTimer();
-    if (!isPlaying || isScrubbing) return;
-    hideControlsTimer.current = window.setTimeout(() => {
-      setAreControlsVisible(false);
-    }, delayMs);
-  }, [clearHideControlsTimer, isPlaying, isScrubbing]);
+	  const scheduleHideControls = useCallback((delayMs = 2000) => {
+	    clearHideControlsTimer();
+	    if (isScrubbing) return;
+	    hideControlsTimer.current = window.setTimeout(() => {
+	      setAreControlsVisible(false);
+	    }, delayMs);
+	  }, [clearHideControlsTimer, isScrubbing]);
+
+	  const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+		  const hideTimelinePreview = useCallback(() => {
+		    timelinePreviewPendingRef.current = null;
+		    timelinePreviewCaptureTimeRef.current = null;
+		    timelinePreviewTokenRef.current += 1;
+		    setTimelinePreview(prev => (prev.isVisible ? { ...prev, isVisible: false } : prev));
+		  }, []);
+
+	  useEffect(() => {
+	    if (!areControlsVisible) hideTimelinePreview();
+	  }, [areControlsVisible, hideTimelinePreview]);
+
+		  useEffect(() => {
+		    return () => {
+		      if (timelinePreviewRafRef.current !== null) {
+		        window.cancelAnimationFrame(timelinePreviewRafRef.current);
+		        timelinePreviewRafRef.current = null;
+		      }
+		      if (previewRafRef.current !== null) {
+		        window.cancelAnimationFrame(previewRafRef.current);
+		        previewRafRef.current = null;
+		      }
+		      if (muteNotificationTimerRef.current !== null) {
+		        window.clearTimeout(muteNotificationTimerRef.current);
+		        muteNotificationTimerRef.current = null;
+		      }
+		    };
+		  }, []);
 
   useEffect(() => {
     const update = () => {
@@ -236,12 +311,14 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     });
   }, [clips]);
 
-  const totalDuration = sequence.length > 0 
-    ? sequence[sequence.length - 1].sequenceEnd 
-    : 0;
-  
-  const totalDurationRef = useRef(totalDuration);
-  useEffect(() => { totalDurationRef.current = totalDuration; }, [totalDuration]);
+	  const totalDuration = sequence.length > 0 
+	    ? sequence[sequence.length - 1].sequenceEnd 
+	    : 0;
+	  
+	  const totalDurationRef = useRef(totalDuration);
+	  useEffect(() => { totalDurationRef.current = totalDuration; }, [totalDuration]);
+	  const sequenceRef = useRef(sequence);
+	  useEffect(() => { sequenceRef.current = sequence; }, [sequence]);
 
   // Derive active clip object
   const activeClipIndex = sequence.findIndex(c => c.id === activeClipId);
@@ -302,7 +379,15 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     }
 
     const apply = () => {
-      try { vid.currentTime = time; } catch {}
+      try {
+        // Use fastSeek if available for faster preview response
+        const anyVid = vid as any;
+        if (typeof anyVid.fastSeek === 'function') {
+          anyVid.fastSeek(time);
+        } else {
+          vid.currentTime = time;
+        }
+      } catch {}
     };
 
     if (vid.readyState >= 1) {
@@ -319,11 +404,12 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 
   useEffect(() => {
     if (!hasClips) return;
-    if (!isPlaying) {
+    if (!isPointerOverPlayerRef.current) {
       clearHideControlsTimer();
-      setAreControlsVisible(true);
+      setAreControlsVisible(false);
       return;
     }
+    setAreControlsVisible(true);
     scheduleHideControls();
     return clearHideControlsTimer;
   }, [hasClips, isPlaying, scheduleHideControls, clearHideControlsTimer]);
@@ -410,9 +496,232 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     }
   };
 
+  const updateTimelinePreviewFromClientX = useCallback((clientX: number) => {
+    if (!hasClips) return;
+    if (!areControlsVisible) return;
+    const el = timelineRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+
+    const x = clamp(clientX - rect.left, 0, rect.width);
+    const seekTime = rect.width > 0 ? (x / rect.width) * totalDurationRef.current : 0;
+
+    // Calculate thumbnail dimensions based on current aspect ratio
+    const currentAspectRatio = aspectRatioRef.current;
+    const [rW, rH] = currentAspectRatio.split(':').map(Number);
+    const targetRatio = rW / rH;
+
+    // Increased base sizes for better visibility
+    let thumbWidth: number, thumbHeight: number;
+
+    if (targetRatio >= 1) {
+      // Landscape or square: use larger base width
+      thumbWidth = 200;
+      thumbHeight = Math.round(thumbWidth / targetRatio);
+    } else {
+      // Portrait: use larger base height
+      thumbHeight = 160;
+      thumbWidth = Math.round(thumbHeight * targetRatio);
+    }
+
+    // Ensure even numbers for video encoding compatibility
+    thumbWidth = Math.round(thumbWidth / 2) * 2;
+    thumbHeight = Math.round(thumbHeight / 2) * 2;
+
+    // Use mouse X position directly for centering
+    const leftPx = x;
+
+    timelinePreviewPendingRef.current = { time: seekTime, leftPx };
+    timelinePreviewCaptureTimeRef.current = seekTime;
+
+    // Immediately update position without RAF throttling for smoother movement
+    setTimelinePreview(prev => ({
+      ...prev,
+      isVisible: true,
+      leftPx,
+      time: seekTime,
+      width: thumbWidth,
+      height: thumbHeight,
+    }));
+
+    if (timelinePreviewWorkerRunningRef.current) return;
+    timelinePreviewWorkerRunningRef.current = true;
+    const workerToken = timelinePreviewTokenRef.current;
+
+    void (async () => {
+      try {
+        let idleFrames = 0;
+
+        while (workerToken === timelinePreviewTokenRef.current) {
+          const requestedTime = timelinePreviewCaptureTimeRef.current;
+          if (requestedTime === null) {
+            idleFrames += 1;
+            if (idleFrames > 30) break; // Increased from 20 to allow more attempts
+            await new Promise<void>((resolve) => window.setTimeout(resolve, 4)); // Reduced from 8ms to 4ms
+            continue;
+          }
+
+          idleFrames = 0;
+
+          const vid = timelinePreviewVideoRef.current;
+          const canvas = timelinePreviewCanvasRef.current;
+          if (!vid || !canvas) {
+            await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+            continue;
+          }
+          timelinePreviewCaptureTimeRef.current = null;
+
+          // Calculate thumbnail dimensions based on current aspect ratio
+          const currentAspectRatio = aspectRatioRef.current;
+          const [rW, rH] = currentAspectRatio.split(':').map(Number);
+          const targetRatio = rW / rH;
+
+          // Increased base sizes for better visibility (matching updateTimelinePreviewFromClientX)
+          let width: number, height: number;
+
+          if (targetRatio >= 1) {
+            // Landscape or square: use larger base width
+            width = 200;
+            height = Math.round(width / targetRatio);
+          } else {
+            // Portrait: use larger base height
+            height = 160;
+            width = Math.round(height * targetRatio);
+          }
+
+          // Ensure even numbers for video encoding compatibility
+          width = Math.round(width / 2) * 2;
+          height = Math.round(height / 2) * 2;
+
+          const canvasWidth = width * 2; // Higher resolution for quality
+          const canvasHeight = height * 2;
+
+          if (canvas.width !== canvasWidth) canvas.width = canvasWidth;
+          if (canvas.height !== canvasHeight) canvas.height = canvasHeight;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) continue;
+
+          const clippedTime = Math.max(0, Math.min(requestedTime, totalDurationRef.current));
+          const seq = sequenceRef.current;
+          if (!seq.length) continue;
+
+          const targetClip =
+            seq.find(c => clippedTime >= c.sequenceStart && clippedTime < c.sequenceEnd) ||
+            seq[seq.length - 1];
+          if (!targetClip) continue;
+
+          const unclampedLocalTime = targetClip.start + (clippedTime - targetClip.sequenceStart);
+          const localTime = Math.max(targetClip.start, Math.min(unclampedLocalTime, targetClip.end));
+
+          const src = targetClip.url;
+          const currentSrc = vid.getAttribute('src');
+          if (currentSrc !== src) {
+            vid.setAttribute('src', src);
+            try { vid.load(); } catch {}
+          }
+
+          await new Promise<void>((resolve) => {
+            if (vid.readyState >= 1) return resolve();
+            vid.addEventListener('loadedmetadata', () => resolve(), { once: true });
+            vid.addEventListener('error', () => resolve(), { once: true });
+          });
+          if (workerToken !== timelinePreviewTokenRef.current) break;
+          if (vid.readyState < 1) continue;
+
+          await new Promise<void>((resolve) => {
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              resolve();
+            };
+
+            const timeoutId = window.setTimeout(finish, 50); // Reduced from 100ms to 50ms
+            vid.addEventListener('seeked', () => {
+              window.clearTimeout(timeoutId);
+              finish();
+            }, { once: true });
+
+            try {
+              const anyVid = vid as any;
+              if (typeof anyVid.fastSeek === 'function') anyVid.fastSeek(localTime);
+              else vid.currentTime = localTime;
+            } catch {
+              window.clearTimeout(timeoutId);
+              finish();
+            }
+          });
+          if (workerToken !== timelinePreviewTokenRef.current) break;
+
+          const anyVid = vid as any;
+          if (typeof anyVid.requestVideoFrameCallback === 'function') {
+            await new Promise<void>((resolve) => {
+              let done = false;
+              const finish = () => {
+                if (done) return;
+                done = true;
+                resolve();
+              };
+
+              const timeoutId = window.setTimeout(finish, 25); // Reduced from 50ms to 25ms
+              anyVid.requestVideoFrameCallback(() => {
+                window.clearTimeout(timeoutId);
+                finish();
+              });
+            });
+            if (workerToken !== timelinePreviewTokenRef.current) break;
+          }
+
+          ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+          ctx.fillStyle = '#000';
+          ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+          const vw = vid.videoWidth || canvasWidth;
+          const vh = vid.videoHeight || canvasHeight;
+          const currentFitMode = fitModeRef.current;
+
+          let scale: number, drawW: number, drawH: number, dx: number, dy: number;
+
+          if (currentFitMode === 'cover') {
+            // Cover mode: fill entire canvas, may crop video
+            scale = Math.max(canvasWidth / vw, canvasHeight / vh);
+            drawW = vw * scale;
+            drawH = vh * scale;
+            dx = (canvasWidth - drawW) / 2;
+            dy = (canvasHeight - drawH) / 2;
+          } else {
+            // Contain mode: fit video inside canvas, may have letterboxing
+            scale = Math.min(canvasWidth / vw, canvasHeight / vh);
+            drawW = vw * scale;
+            drawH = vh * scale;
+            dx = (canvasWidth - drawW) / 2;
+            dy = (canvasHeight - drawH) / 2;
+          }
+
+          try {
+            ctx.drawImage(vid, dx, dy, drawW, drawH);
+          } catch {
+            // ignore drawing failures
+          }
+        }
+      } finally {
+        timelinePreviewWorkerRunningRef.current = false;
+      }
+    })();
+  }, [areControlsVisible, clamp, hasClips, sequenceRef]);
+
   const endPreview = useCallback(() => {
     if (!isPreviewingRef.current) return;
     isPreviewingRef.current = false;
+
+    // Cancel pending RAF if exists
+    if (previewRafRef.current !== null) {
+      window.cancelAnimationFrame(previewRafRef.current);
+      previewRafRef.current = null;
+    }
+    previewPendingTimeRef.current = null;
+
     const restore = previewRestoreRef.current;
     previewRestoreRef.current = null;
 
@@ -433,11 +742,9 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     if (!vid) return;
 
     const seekTime = Math.max(0, Math.min(time, totalDurationRef.current));
-    const targetClip = sequence.find(c => seekTime >= c.sequenceStart && seekTime < c.sequenceEnd) || sequence[sequence.length - 1];
-    if (!targetClip) return;
 
-    const unclampedLocalTime = targetClip.start + (seekTime - targetClip.sequenceStart);
-    const localTime = Math.max(targetClip.start, Math.min(unclampedLocalTime, targetClip.end));
+    // Store pending time for RAF processing
+    previewPendingTimeRef.current = seekTime;
 
     if (!isPreviewingRef.current) {
       isPreviewingRef.current = true;
@@ -448,9 +755,51 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
       };
     }
 
+    // Update display immediately for instant visual feedback
     setGlobalTimeDisplay(seekTime);
-    setVideoSrcAndTime(targetClip.url, localTime);
-  }, [hasClips, isPlaying, sequence, globalTimeDisplay, setVideoSrcAndTime]);
+
+    // Use RAF to throttle actual video seeking
+    if (previewRafRef.current === null) {
+      previewRafRef.current = window.requestAnimationFrame(() => {
+        previewRafRef.current = null;
+        const pendingTime = previewPendingTimeRef.current;
+        if (pendingTime === null) return;
+
+        const targetClip = sequence.find(c => pendingTime >= c.sequenceStart && pendingTime < c.sequenceEnd) || sequence[sequence.length - 1];
+        if (!targetClip) return;
+
+        const unclampedLocalTime = targetClip.start + (pendingTime - targetClip.sequenceStart);
+        const localTime = Math.max(targetClip.start, Math.min(unclampedLocalTime, targetClip.end));
+
+        // Use optimized seek method for faster response
+        const currentSrc = vid.getAttribute('src');
+        if (currentSrc !== targetClip.url) {
+          vid.src = targetClip.url;
+        }
+
+        const applySeek = () => {
+          try {
+            const anyVid = vid as any;
+            if (typeof anyVid.fastSeek === 'function') {
+              anyVid.fastSeek(localTime);
+            } else {
+              vid.currentTime = localTime;
+            }
+          } catch {}
+        };
+
+        if (vid.readyState >= 1) {
+          applySeek();
+        } else {
+          const onLoaded = () => {
+            applySeek();
+            vid.removeEventListener('loadedmetadata', onLoaded);
+          };
+          vid.addEventListener('loadedmetadata', onLoaded);
+        }
+      });
+    }
+  }, [hasClips, isPlaying, sequence, globalTimeDisplay]);
 
   const commitSeekToGlobalTime = useCallback((time: number) => {
     endPreview();
@@ -479,8 +828,9 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     endPreview,
     play,
     pause,
+    toggleMute,
     getIsPlaying: () => isPlayingRef.current,
-  }), [commitSeekToGlobalTime, previewAtGlobalTime, endPreview, play, pause]);
+  }), [commitSeekToGlobalTime, previewAtGlobalTime, endPreview, play, pause, toggleMute]);
   
   const seekRef = useRef(seekToGlobalTime);
   useEffect(() => { seekRef.current = seekToGlobalTime; });
@@ -490,6 +840,7 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
     clearHideControlsTimer();
     setAreControlsVisible(true);
     setIsScrubbing(true);
+    setTimelinePreview(prev => ({ ...prev, isVisible: true }));
 
     const calcTime = (clientX: number) => {
         if (!timelineRef.current) return 0;
@@ -501,15 +852,18 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 
     // Initial click seek
     seekRef.current(calcTime(e.clientX));
+    updateTimelinePreviewFromClientX(e.clientX);
 
     const onMouseMove = (ev: MouseEvent) => {
         const t = calcTime(ev.clientX);
         seekRef.current(t);
+        updateTimelinePreviewFromClientX(ev.clientX);
     };
 
     const onMouseUp = () => {
         setIsScrubbing(false);
         scheduleHideControls();
+        if (!isTimelineHoveredRef.current) hideTimelinePreview();
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
     };
@@ -538,22 +892,13 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
   }
 
   // --- Volume Logic ---
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newVol = parseFloat(e.target.value);
-    setVolume(newVol);
-    if (newVol > 0 && isMuted) {
-      setIsMuted(false);
-    }
-  };
-
-  const toggleMute = () => {
-    if (isMuted || volume === 0) {
-      setIsMuted(false);
-      if (volume === 0) setVolume(1);
-    } else {
-      setIsMuted(true);
-    }
-  };
+	  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+	    const newVol = parseFloat(e.target.value);
+	    setVolume(newVol);
+	    if (newVol > 0 && isMuted) {
+	      setIsMuted(false);
+	    }
+	  };
 
   const currentRatioLabel = useMemo(() => {
     return ratios.find(r => r.value === aspectRatio)?.label ?? aspectRatio;
@@ -627,33 +972,38 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 					              className={`relative w-full flex items-center justify-center ${isFullscreen ? 'bg-black' : ''}`}
 				            >
 						              <div
-						                className={`relative flex flex-col justify-center overflow-hidden transition-all duration-300 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/20 ${
-						                  isFullscreen ? 'border-0 shadow-none' : 'border border-[#9BA8AB]/45'
-						                } ${isFullscreen ? 'rounded-none' : 'rounded-2xl'} ${hasClips ? 'bg-black' : 'bg-transparent'}`}
+							                className={`relative flex flex-col justify-center overflow-hidden transition-all duration-300 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/20 ${
+							                  isFullscreen ? 'border-0 shadow-none' : 'border border-[#9BA8AB]/45'
+							                } ${isFullscreen ? 'rounded-none' : 'rounded-2xl'} ${
+							                  hasClips
+							                    ? (isFullscreen ? 'bg-black' : 'bg-white/10 backdrop-blur-2xl')
+							                    : 'bg-transparent'
+							                }`}
 						                ref={videoWrapperRef}
 						                data-spacebar-play="true"
 						                tabIndex={0}
 						                style={isFullscreen ? fullscreenFrameStyle : wrapperStyle}
 					              onPointerMove={() => {
+					                isPointerOverPlayerRef.current = true;
 					                setAreControlsVisible(true);
 					                scheduleHideControls();
 				              }}
 	              onPointerEnter={() => {
+	                isPointerOverPlayerRef.current = true;
 	                setAreControlsVisible(true);
 	                scheduleHideControls();
 	              }}
 	              onPointerDown={() => {
+	                isPointerOverPlayerRef.current = true;
 	                setAreControlsVisible(true);
 	                scheduleHideControls();
 	              }}
 		              onPointerLeave={() => {
+		                isPointerOverPlayerRef.current = false;
 		                clearHideControlsTimer();
-		                if (isPlaying) setAreControlsVisible(false);
+		                if (!isScrubbingRef.current) setAreControlsVisible(false);
 		              }}
 			            >
-			              {!hasClips && (
-				                <div className="absolute inset-x-0 bottom-0 h-1/3 bg-gradient-to-t from-black/35 via-black/15 to-transparent pointer-events-none" />
-			              )}
                 {hasClips ? (
 			                <video
 			                  ref={videoRef}
@@ -666,36 +1016,98 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 	                  playsInline
 	                />
                 ) : (
-	                  <div 
-	                    onClick={onAddVideo}
-	                    className="w-full h-full flex items-center justify-center"
-	                  >
-			                    <div className="w-full max-w-md aspect-video border-2 border-dashed border-[#9BA8AB]/55 rounded-2xl flex items-center justify-center cursor-pointer hover:border-brand-500/35 hover:bg-white/35 transition-all group bg-white/35 backdrop-blur-xl">
-			                      <div className="w-16 h-16 rounded-full bg-white/70 flex items-center justify-center group-hover:scale-110 group-hover:bg-white/85 transition-all shadow-sm border border-[#9BA8AB]/45">
+	                  <div className="w-full h-full flex items-center justify-center">
+			                    <div className="w-full max-w-md aspect-video border-2 border-transparent rounded-2xl flex items-center justify-center pointer-events-none transition-all group">
+			                      <div
+			                        onClick={onAddVideo}
+			                        className="w-16 h-16 rounded-full bg-white/70 flex items-center justify-center group-hover:scale-110 group-hover:bg-white/85 transition-all shadow-sm border border-[#9BA8AB]/45 cursor-pointer pointer-events-auto"
+			                      >
 			                        <Plus size={24} className="text-brand-500 transition-colors" />
 			                      </div>
 			                    </div>
 	                  </div>
                 )}
 
-		              {/* Bottom Controls (YouTube-like overlay; auto-hide on inactivity) */}
-			              {hasClips && (
-		                <div className="absolute bottom-0 left-0 right-0 h-1/3 pointer-events-none z-30">
-					                  <div
-						                    className={`pointer-events-auto h-full px-4 pb-3 bg-gradient-to-t from-black/80 via-black/30 to-transparent transition-opacity duration-200 flex flex-col justify-end ${
-						                      areControlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
-						                    }`}
-						                  >
-	                  {/* Scrubber */}
-		                  <div
-		                    ref={timelineRef}
-		                    className="h-1.5 w-full bg-[#CCD0CF]/20 cursor-pointer relative group rounded-full"
-		                    onMouseDown={handleTimelineMouseDown}
-		                  >
-	                    <div
-	                      className="absolute top-0 bottom-0 left-0 bg-[#ff0000] rounded-full"
-	                      style={{
-	                        width: `${(globalTimeDisplay / Math.max(totalDuration, 0.001)) * 100}%`,
+					              {/* Mute Notification */}
+					              {muteNotificationVisible && (
+					                <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-40 animate-in fade-in duration-200">
+					                  <div className="bg-transparent rounded-2xl px-6 py-4 flex items-center gap-3">
+					                    {isMuted ? (
+					                      <VolumeX size={32} className="text-white" />
+					                    ) : (
+					                      <Volume2 size={32} className="text-white" />
+					                    )}
+					                  </div>
+					                </div>
+					              )}
+
+					              {/* Bottom Controls (YouTube-like overlay; auto-hide on inactivity) */}
+				              {hasClips && (
+								                <div className="absolute bottom-0 left-0 right-0 h-1/3 pointer-events-none z-30">
+									                  <div
+										                    className={`pointer-events-none h-full px-4 pb-3 transition-opacity duration-200 flex flex-col justify-end ${
+										                      areControlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+										                    }`}
+									                  >
+			                  {/* Scrubber with Extended Hover Area (YouTube-style) */}
+				                  <div
+				                    ref={timelineRef}
+				                    className={`h-1.5 w-full bg-[#CCD0CF]/20 cursor-pointer relative group rounded-full ${
+				                      areControlsVisible ? 'pointer-events-auto' : 'pointer-events-none'
+				                    }`}
+				                    onMouseDown={handleTimelineMouseDown}
+				                  >
+				                    {/* Invisible Extended Hover Area Above Timeline (YouTube-style) - Only covers gap, not thumbnail */}
+				                    <div
+				                      className="absolute bottom-0 left-0 right-0 h-[24px] -translate-y-0 pointer-events-auto"
+				                      onPointerEnter={(e) => {
+				                        isTimelineHoveredRef.current = true;
+				                        updateTimelinePreviewFromClientX(e.clientX);
+				                      }}
+				                      onPointerMove={(e) => {
+				                        isTimelineHoveredRef.current = true;
+				                        updateTimelinePreviewFromClientX(e.clientX);
+				                      }}
+				                      onPointerLeave={() => {
+				                        isTimelineHoveredRef.current = false;
+				                        if (!isScrubbingRef.current) hideTimelinePreview();
+				                      }}
+				                    />
+					                    {timelinePreview.isVisible && areControlsVisible && (
+					                      <div
+					                        className="absolute pointer-events-none"
+					                        style={{
+					                          left: timelinePreview.leftPx,
+					                          transform: 'translateX(-50%)',
+					                          bottom: '100%',
+					                          marginBottom: '14px'
+					                        }}
+					                      >
+					                        <div
+					                          className="rounded-lg overflow-hidden border border-white/20 bg-black/70 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
+					                          style={{
+					                            width: `${timelinePreview.width}px`,
+					                            height: `${timelinePreview.height}px`
+					                          }}
+					                        >
+					                          <canvas
+					                            ref={timelinePreviewCanvasRef}
+					                            width={timelinePreview.width * 2}
+					                            height={timelinePreview.height * 2}
+					                            className="w-full h-full block"
+					                          />
+					                        </div>
+					                        <div className="mt-2 flex justify-center">
+					                          <div className="px-3 py-1 rounded-full bg-black/55 text-white/90 text-[11px] font-mono [filter:drop-shadow(0_8px_22px_rgba(0,0,0,0.65))]">
+					                            {formatDurationDisplay(timelinePreview.time)}
+					                          </div>
+					                        </div>
+					                      </div>
+					                    )}
+		                    <div
+		                      className="absolute top-0 bottom-0 left-0 bg-[#ff0000] rounded-full"
+		                      style={{
+		                        width: `${(globalTimeDisplay / Math.max(totalDuration, 0.001)) * 100}%`,
 	                        transition: isScrubbing || isPlaying ? 'none' : 'width 200ms linear',
 	                      }}
 	                    />
@@ -707,31 +1119,33 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 	                        transition: isScrubbing || isPlaying ? 'none' : 'left 200ms linear, opacity 150ms ease',
 	                      }}
 	                    />
-	                  </div>
+		                  </div>
 
-                  {/* Controls Row */}
-                  <div className="mt-2 flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-4 min-w-0">
-	                      <button
-	                        onClick={togglePlay}
-	                        className="w-9 h-9 flex items-center justify-center rounded-full text-[#CCD0CF] hover:bg-[#CCD0CF]/10 transition-colors"
-	                      >
-                        {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
-                      </button>
+			                  {/* Controls Row */}
+						                  <div className={`mt-2 flex items-center justify-between gap-4 ${
+						                    areControlsVisible ? 'pointer-events-auto' : 'pointer-events-none'
+						                  }`}>
+					                    <div className="flex items-center gap-4 min-w-0">
+				                      <button
+				                        onClick={togglePlay}
+				                        className="w-9 h-9 flex items-center justify-center rounded-full text-white/90 [filter:drop-shadow(0_8px_22px_rgba(0,0,0,0.6))] hover:text-white active:scale-95 transition-transform"
+				                      >
+			                        {isPlaying ? <Pause size={20} fill="currentColor" /> : <Play size={20} fill="currentColor" />}
+			                      </button>
 
-                      <div className="flex items-center gap-3 group/vol">
-	                        <button
-	                          onClick={toggleMute}
-	                          className="text-[#CCD0CF] hover:text-[#CCD0CF] transition-colors"
-	                        >
-                          {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
-                        </button>
-	                        <div className="w-24 h-1 bg-[#CCD0CF]/20 rounded-full relative overflow-hidden cursor-pointer group-hover/vol:bg-[#CCD0CF]/25">
-                          <input
-                            type="range"
-                            min={0}
-                            max={1}
-                            step={0.01}
+	                      <div className="flex items-center group/vol">
+			                        <button
+			                          onClick={toggleMute}
+			                          className="w-9 h-9 flex items-center justify-center rounded-full text-white/90 [filter:drop-shadow(0_8px_22px_rgba(0,0,0,0.6))] hover:text-white active:scale-95 transition-transform"
+			                        >
+			                          {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+		                        </button>
+		                        <div className="w-0 ml-0 opacity-0 pointer-events-none group-hover/vol:w-24 group-hover/vol:ml-3 group-hover/vol:opacity-100 group-hover/vol:pointer-events-auto group-focus-within/vol:w-24 group-focus-within/vol:ml-3 group-focus-within/vol:opacity-100 group-focus-within/vol:pointer-events-auto h-1 bg-[#CCD0CF]/20 rounded-full relative overflow-hidden cursor-pointer group-hover/vol:bg-[#CCD0CF]/25 transition-all duration-200">
+	                          <input
+	                            type="range"
+	                            min={0}
+	                            max={1}
+	                            step={0.01}
                             value={isMuted ? 0 : volume}
                             onChange={handleVolumeChange}
                             className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
@@ -743,22 +1157,22 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
                         </div>
                       </div>
 
-		                      <div className="font-mono text-xs text-[#CCD0CF] tracking-wide select-none bg-black/35 px-2 py-1 rounded border border-white/15">
-		                        <span className="text-[#CCD0CF]">{formatDurationDisplay(globalTimeDisplay)}</span>
-		                      </div>
-	                    </div>
-
-			                    <div className="flex items-center gap-2 shrink-0">
-				                      <div className="text-[10px] font-bold text-[#CCD0CF] bg-black/35 border border-white/15 px-2 py-1 rounded select-none">
-				                        {projectFps} FPS
+				                      <div className="font-mono text-xs text-white/90 tracking-wide select-none [filter:drop-shadow(0_8px_22px_rgba(0,0,0,0.7))] px-2 py-1 rounded">
+				                        <span className="text-white/90">{formatDurationDisplay(globalTimeDisplay)}</span>
 				                      </div>
-				                      <button
-				                        onClick={toggleFullscreen}
-				                        className="w-9 h-9 flex items-center justify-center rounded-full text-[#CCD0CF] hover:text-[#CCD0CF] hover:bg-[#CCD0CF]/10 transition-colors"
-				                        aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-				                        title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-				                      >
-			                        {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+		                    </div>
+
+				                    <div className="flex items-center gap-2 shrink-0">
+						                      <div className="text-[10px] font-bold text-white/90 [filter:drop-shadow(0_8px_22px_rgba(0,0,0,0.7))] px-2 py-1 rounded select-none">
+						                        {projectFps} FPS
+						                      </div>
+						                      <button
+						                        onClick={toggleFullscreen}
+						                        className="w-9 h-9 flex items-center justify-center rounded-full text-white/90 [filter:drop-shadow(0_8px_22px_rgba(0,0,0,0.6))] hover:text-white active:scale-95 transition-transform"
+						                        aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+						                        title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+						                      >
+				                        {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
 			                      </button>
 			                    </div>
 		                </div>
@@ -767,20 +1181,21 @@ export const Player = React.forwardRef<PlayerHandle, PlayerProps>(({
 		              )}
 	              
 	              {/* Centered Big Play Button (when paused) */}
-			              {hasClips && !isPlaying && (
-			                <div className="absolute inset-0 flex items-center justify-center z-20 bg-black/25 backdrop-blur-[1px]">
-			                  <button 
-			                    onClick={togglePlay}
-		                    className="w-16 h-16 bg-black/30 backdrop-blur-md rounded-full flex items-center justify-center text-[#CCD0CF] border border-white/15 hover:bg-black/40 hover:scale-110 transition-all duration-300 group shadow-2xl"
-		                  >
-	                    <Play size={32} fill="currentColor" className="ml-1 opacity-90 group-hover:opacity-100" />
-	                  </button>
-	                </div>
-		              )}
-			          </div>
-			        </div>
-			      </div>
-		        )}
+				              {hasClips && !isPlaying && (
+				                <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none">
+					                  <button 
+					                    onClick={togglePlay}
+				                    className="pointer-events-auto w-16 h-16 rounded-full flex items-center justify-center text-white/90 [filter:drop-shadow(0_18px_50px_rgba(0,0,0,0.6))] hover:text-white hover:scale-110 active:scale-95 transition-transform duration-300 group"
+				                  >
+			                    <Play size={32} fill="currentColor" className="ml-1 opacity-90 group-hover:opacity-100" />
+			                  </button>
+		                </div>
+			              )}
+			              <video ref={timelinePreviewVideoRef} className="hidden" muted playsInline preload="auto" />
+					          </div>
+				        </div>
+				      </div>
+			        )}
 		      </div>
 	    </div>
 	  );

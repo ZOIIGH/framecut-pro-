@@ -39,7 +39,7 @@ export default function App() {
 
   type ExportResolution = 'auto' | '720p' | '1080p';
   type ExportFps = 'auto' | 24 | 30 | 60;
-  type ExportCodec = 'copy' | 'h264';
+  type ExportCodec = 'h264';
 
   const [exportConfig, setExportConfig] = useState<{
     filename: string;
@@ -47,21 +47,15 @@ export default function App() {
     resolution: ExportResolution;
     fps: ExportFps;
     codec: ExportCodec;
-  }>({
-    filename: 'my_sequence',
-    format: 'mp4',
-    resolution: 'auto',
-    fps: 'auto',
-    codec: 'copy',
-  });
+	  }>({
+	    filename: 'my_sequence',
+	    format: 'mp4',
+	    resolution: 'auto',
+	    fps: 'auto',
+	    codec: 'h264',
+	  });
 
-  // API Settings Modal (UI placeholder)
-  const [isApiSettingsOpen, setIsApiSettingsOpen] = useState(false);
-  const [apiSettings, setApiSettings] = useState({
-    endpoint: '',
-    apiKey: '',
-  });
-  
+
   // Drag Visual State
   const [dragState, setDragState] = useState<{ source: number | null; target: number | null }>({ source: null, target: null });
 
@@ -129,9 +123,12 @@ export default function App() {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
-      const isSpace = e.code === 'Space' || e.key === ' ';
-      if (!isSpace) return;
+      if (e.repeat) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      const isSpace = e.code === 'Space' || e.key === ' ';
+      const isMuteToggle = e.code === 'KeyM' || e.key?.toLowerCase() === 'm';
+      if (!isSpace && !isMuteToggle) return;
 
       const activeEl = document.activeElement as HTMLElement | null;
       if (isEditable(activeEl)) return;
@@ -140,13 +137,25 @@ export default function App() {
       const player = playerRef.current;
       if (!player) return;
 
+      if (isMuteToggle) {
+        e.preventDefault();
+        player.toggleMute();
+        return;
+      }
+
       if (player.getIsPlaying()) {
         e.preventDefault();
         player.pause();
         return;
       }
 
-      const eligible = Boolean(activeEl?.closest('[data-spacebar-play="true"]'));
+      const isBackground =
+        !activeEl ||
+        activeEl === document.body ||
+        activeEl === document.documentElement ||
+        activeEl.id === 'root';
+
+      const eligible = isBackground || Boolean(activeEl?.closest('[data-spacebar-play="true"]'));
       if (!eligible) return;
 
       e.preventDefault();
@@ -349,15 +358,10 @@ export default function App() {
 	      await ffmpegForExport.writeFile('concat_list.txt', concatListContent);
 	      const outputName = `output.${exportConfig.format}`;
 
-	      const effectiveCodec: ExportCodec =
-	        exportConfig.codec === 'copy' && (exportConfig.resolution !== 'auto' || exportConfig.fps !== 'auto')
-	          ? 'h264'
-	          : exportConfig.codec;
-
-	      const runH264 = async () => {
-	        setExportStatus('Rendering (H.264)…');
-	        const dims = getExportDimensions(exportConfig.resolution);
-	        const fps = exportConfig.fps === 'auto' ? projectFps : exportConfig.fps;
+		      const runH264 = async () => {
+		        setExportStatus('Rendering (H.264)…');
+		        const dims = getExportDimensions(exportConfig.resolution);
+		        const fps = exportConfig.fps === 'auto' ? projectFps : exportConfig.fps;
 	        const videoFilter = dims
 	          ? (displayFitMode === 'cover'
 	            ? `scale=${dims.width}:${dims.height}:force_original_aspect_ratio=increase,crop=${dims.width}:${dims.height},setsar=1`
@@ -382,27 +386,9 @@ export default function App() {
 	          '-movflags', '+faststart',
 	          outputName,
 	        );
-	        await ffmpegForExport.exec(args);
-	      };
-
-	      if (effectiveCodec === 'copy') {
-	        setExportStatus('Merging (Stream Copy)…');
-	        try {
-	          // -c copy is fast but requires compatible codecs.
-	          await ffmpegForExport.exec([
-	            '-f', 'concat',
-	            '-safe', '0',
-	            '-i', 'concat_list.txt',
-	            '-c', 'copy',
-	            outputName,
-	          ]);
-	        } catch (err) {
-	          console.warn('Stream copy failed; retrying with H.264 re-encode', err);
-	          await runH264();
-	        }
-	      } else {
-	        await runH264();
-	      }
+		        await ffmpegForExport.exec(args);
+		      };
+		      await runH264();
 
       // 3. Retrieve and Download
       setExportStatus('Saving file...');
@@ -653,13 +639,6 @@ export default function App() {
 	            >
               <Download size={14} /> 導出
             </button>
-
-              <button
-                onClick={() => setIsApiSettingsOpen(true)}
-	                className="h-9 px-3 rounded-lg text-xs font-bold uppercase tracking-wide flex items-center gap-2 bg-white/65 hover:bg-white/75 text-[#253745] border border-[#9BA8AB]/45 backdrop-blur-xl transition-colors"
-	              >
-                <Settings size={14} /> API設定
-              </button>
           </div>
         </div>
       </header>
@@ -721,40 +700,35 @@ export default function App() {
 			                 </div>
 
 		                 {/* Encoding */}
-		                 <div className="space-y-2">
-			                   <label className="text-xs font-bold text-[#4A5C6A] uppercase tracking-wider block">Encoding</label>
-				                   <select
-			                     value={exportConfig.codec}
-	                     onChange={(e) => {
-	                       const codec = e.target.value as ExportCodec;
-	                       setExportConfig(c => codec === 'copy'
-	                         ? { ...c, codec, resolution: 'auto', fps: 'auto' }
-	                         : { ...c, codec }
-	                       );
-	                     }}
-				                     className="w-full bg-white/70 border border-[#9BA8AB]/45 text-[#253745] text-sm rounded-lg px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/25 transition-all"
-				                   >
-	                     <option value="copy">Stream Copy (fast)</option>
-	                     <option value="h264">H.264 (re-encode)</option>
-	                   </select>
-			                   <div className="text-[11px] text-[#4A5C6A]">
-			                     調整解析度 / FPS 會自動切換為 H.264 重新編碼。
-			                   </div>
-		                 </div>
+			                 <div className="space-y-2">
+				                   <label className="text-xs font-bold text-[#4A5C6A] uppercase tracking-wider block">Encoding</label>
+					                   <select
+				                     value={exportConfig.codec}
+		                     onChange={(e) => {
+		                       const codec = e.target.value as ExportCodec;
+		                       setExportConfig(c => ({ ...c, codec }));
+		                     }}
+					                     className="w-full bg-white/70 border border-[#9BA8AB]/45 text-[#253745] text-sm rounded-lg px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/25 transition-all"
+					                   >
+		                     <option value="h264">H.264 (re-encode)</option>
+		                   </select>
+				                   <div className="text-[11px] text-[#4A5C6A]">
+				                     將以 H.264 重新編碼輸出。
+				                   </div>
+			                 </div>
 
 		                 {/* Resolution */}
 		                 <div className="space-y-2">
 			                   <label className="text-xs font-bold text-[#4A5C6A] uppercase tracking-wider block">Resolution</label>
 				                   <select
 		                     value={exportConfig.resolution}
-	                     onChange={(e) => {
-	                       const resolution = e.target.value as ExportResolution;
-	                       setExportConfig(c => ({
-	                         ...c,
-	                         resolution,
-	                         codec: resolution !== 'auto' && c.codec === 'copy' ? 'h264' : c.codec,
-	                       }));
-	                     }}
+		                     onChange={(e) => {
+		                       const resolution = e.target.value as ExportResolution;
+		                       setExportConfig(c => ({
+		                         ...c,
+		                         resolution,
+		                       }));
+		                     }}
 				                     className="w-full bg-white/70 border border-[#9BA8AB]/45 text-[#253745] text-sm rounded-lg px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/25 transition-all"
 				                   >
 	                     <option value="auto">Auto (keep source)</option>
@@ -768,15 +742,14 @@ export default function App() {
 			                   <label className="text-xs font-bold text-[#4A5C6A] uppercase tracking-wider block">FPS</label>
 				                   <select
 		                     value={String(exportConfig.fps)}
-	                     onChange={(e) => {
-	                       const v = e.target.value;
-	                       const fps = (v === 'auto' ? 'auto' : (Number(v) as ExportFps));
-	                       setExportConfig(c => ({
-	                         ...c,
-	                         fps,
-	                         codec: fps !== 'auto' && c.codec === 'copy' ? 'h264' : c.codec,
-	                       }));
-	                     }}
+		                     onChange={(e) => {
+		                       const v = e.target.value;
+		                       const fps = (v === 'auto' ? 'auto' : (Number(v) as ExportFps));
+		                       setExportConfig(c => ({
+		                         ...c,
+		                         fps,
+		                       }));
+		                     }}
 				                     className="w-full bg-white/70 border border-[#9BA8AB]/45 text-[#253745] text-sm rounded-lg px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/25 transition-all"
 				                   >
 	                     <option value="auto">Auto ({projectFps} FPS)</option>
@@ -826,68 +799,6 @@ export default function App() {
         </div>
       )}
 
-	      {/* API Settings Modal */}
-				      {isApiSettingsOpen && (
-				        <div className="absolute inset-0 z-50 bg-[#9BA8AB]/35 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-		          <div className="bg-white/80 backdrop-blur-xl border border-[#9BA8AB]/45 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col">
-		            <div className="h-14 border-b border-[#9BA8AB]/45 flex items-center justify-between px-6 bg-white/65">
-		              <h3 className="text-sm font-bold text-[#253745] uppercase tracking-wider flex items-center gap-2">
-		                <Settings size={16} className="text-brand-500" />
-		                API設定
-		              </h3>
-		              <button
-		                onClick={() => setIsApiSettingsOpen(false)}
-		                className="text-[#4A5C6A] hover:text-[#253745] transition-colors p-1"
-		              >
-		                <X size={18} />
-		              </button>
-		            </div>
-
-            <div className="p-6 space-y-5">
-		              <div className="space-y-2">
-		                <label className="text-xs font-bold text-[#4A5C6A] uppercase tracking-wider block">Endpoint（端點）</label>
-			                <input
-		                  type="text"
-                  value={apiSettings.endpoint}
-                  onChange={(e) => setApiSettings(s => ({ ...s, endpoint: e.target.value }))}
-                  placeholder="https://api.example.com"
-			                  className="w-full bg-white/70 border border-[#9BA8AB]/45 text-[#253745] text-sm rounded-lg px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/25 transition-all placeholder:text-[#9BA8AB]"
-			                />
-		              </div>
-
-		              <div className="space-y-2">
-		                <label className="text-xs font-bold text-[#4A5C6A] uppercase tracking-wider block">API Key</label>
-			                <input
-		                  type="password"
-                  value={apiSettings.apiKey}
-                  onChange={(e) => setApiSettings(s => ({ ...s, apiKey: e.target.value }))}
-                  placeholder="••••••••••••••••"
-			                  className="w-full bg-white/70 border border-[#9BA8AB]/45 text-[#253745] text-sm rounded-lg px-4 py-3 outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/25 transition-all font-mono placeholder:text-[#9BA8AB]"
-			                />
-		              </div>
-
-			              <div className="text-xs text-[#4A5C6A] bg-white/60 border border-[#9BA8AB]/45 rounded-lg p-3 leading-relaxed">
-			                此處為 UI 預留，尚未發送任何 API 請求。
-			              </div>
-		            </div>
-
-		            <div className="p-4 bg-white/65 border-t border-[#9BA8AB]/45 flex justify-end gap-3">
-		              <button
-		                onClick={() => setIsApiSettingsOpen(false)}
-		                className="px-4 py-2 rounded-lg text-xs font-bold text-[#4A5C6A] hover:text-[#253745] hover:bg-[#CCD0CF]/60 transition-colors"
-		              >
-		                關閉
-		              </button>
-		              <button
-		                onClick={() => setIsApiSettingsOpen(false)}
-		                className="px-5 py-2 bg-brand-500 hover:bg-brand-500/90 text-[#CCD0CF] rounded-lg text-xs font-bold flex items-center gap-2 shadow-sm active:scale-95 transition-all border border-brand-500/35"
-		              >
-		                儲存 <ChevronRight size={14} />
-		              </button>
-		            </div>
-          </div>
-        </div>
-      )}
 
       {/* Hidden File Input */}
       <input 
@@ -982,18 +893,19 @@ export default function App() {
 	              );
 	            })}
 	
-		            {/* Add Video Button Placeholder */}
-			            <button 
-			              onClick={() => fileInputRef.current?.click()}
-				              className="w-full h-[196px] border border-dashed border-[#9BA8AB]/55 bg-white/45 rounded-xl flex flex-col items-center justify-center text-[#4A5C6A] hover:border-brand-500/35 hover:bg-white/60 transition-all group mb-3 backdrop-blur-xl"
-			              aria-label="Add video"
-			            >
-				              <div className="w-10 h-10 rounded-full bg-white/70 border border-[#9BA8AB]/45 flex items-center justify-center group-hover:scale-110 transition-transform">
-				                <Plus size={20} className="text-brand-500" />
-				              </div>
-			            </button>
-          </div>
-        </aside>
+			            {/* Add Video Button Placeholder */}
+			            <div className="w-full h-[196px] border border-[#9BA8AB]/45 bg-white/35 rounded-xl flex items-center justify-center text-[#4A5C6A] mb-3 backdrop-blur-xl">
+			              <button
+			                type="button"
+			                onClick={() => fileInputRef.current?.click()}
+			                className="w-10 h-10 rounded-full bg-white/70 border border-[#9BA8AB]/45 flex items-center justify-center hover:scale-110 active:scale-95 transition-transform"
+			                aria-label="Add video"
+			              >
+			                <Plus size={20} className="text-brand-500" />
+			              </button>
+			            </div>
+	          </div>
+	        </aside>
 
         {/* Resize Handle */}
 	        <div
